@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ETH Oracle · 次日方向预测</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">Ξ</div>
+        <div>
+          <h1>ETH Oracle</h1>
+          <p>ETH 次日方向预测 · 多因子统计研究</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <span id="data-badge" class="badge">加载中…</span>
+        <span id="model-badge" class="badge muted">模型 —</span>
+        <button id="refresh-btn" class="btn primary" type="button">立即更新</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero-grid">
+        <div class="card chart-card">
+          <div class="card-head">
+            <div>
+              <h2>ETH / USDT · 日线</h2>
+              <p id="chart-sub">最近 240 个已收盘交易日</p>
+            </div>
+            <div class="legend">
+              <span><i class="dot purple"></i>预测走势</span>
+              <span><i class="dot green"></i>预测正确</span>
+              <span><i class="dot red"></i>预测错误</span>
+            </div>
+          </div>
+          <div id="price-chart" class="price-chart"></div>
+        </div>
+
+        <aside class="card prediction-card" id="prediction-card">
+          <div class="card-head">
+            <div>
+              <span class="eyebrow">下一日预测</span>
+              <h2 id="pred-target">等待数据</h2>
+            </div>
+            <span id="pred-status" class="pill pending">待结算</span>
+          </div>
+
+          <div class="direction-big" id="pred-direction">—</div>
+          <p class="direction-sub" id="pred-range">—</p>
+
+          <div class="prob-wrap">
+            <div class="prob-labels"><span>上涨概率</span><strong id="pred-prob">—</strong></div>
+            <div class="prob-track"><div id="pred-prob-bar" class="prob-bar"></div></div>
+            <div class="prob-labels subtle"><span>置信度</span><span id="pred-confidence">—</span></div>
+          </div>
+
+          <div class="pred-prices">
+            <div><span>基准收盘</span><strong id="pred-close">—</strong></div>
+            <div><span>预测收盘</span><strong id="pred-predicted-close">—</strong></div>
+          </div>
+          <div class="pred-return" id="pred-return">—</div>
+
+          <div class="drivers">
+            <div class="section-label">主要影响因子</div>
+            <div id="pred-drivers" class="driver-list"><span class="muted">—</span></div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="stats-grid">
+        <div class="stat card">
+          <span>历史方向准确率</span>
+          <strong id="stat-all-acc">—</strong>
+          <small id="stat-all-n">—</small>
+        </div>
+        <div class="stat card">
+          <span>近 30 次</span>
+          <strong id="stat-30">—</strong>
+          <small id="stat-30-n">—</small>
+        </div>
+        <div class="stat card">
+          <span>近 90 次</span>
+          <strong id="stat-90">—</strong>
+          <small id="stat-90-n">—</small>
+        </div>
+        <div class="stat card">
+          <span>相对基线超额</span>
+          <strong id="stat-edge">—</strong>
+          <small id="stat-baseline">—</small>
+        </div>
+        <div class="stat card">
+          <span>Brier 分数</span>
+          <strong id="stat-brier">—</strong>
+          <small>越低越好</small>
+        </div>
+        <div class="stat card">
+          <span>策略累计</span>
+          <strong id="stat-strategy">—</strong>
+          <small id="stat-sharpe">—</small>
+        </div>
+      </section>
+
+      <section class="two-col">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>滚动胜率</h2>
+              <p>30 次滚动准确率与累计准确率</p>
+            </div>
+            <span class="badge muted">回测 + 实盘已结算</span>
+          </div>
+          <div id="accuracy-chart" class="mini-chart"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>失败原因分布</h2>
+              <p>按自动归因标签统计；同一笔错误可命中多个标签</p>
+            </div>
+            <span class="badge muted" id="failure-count">—</span>
+          </div>
+          <div id="failure-list" class="failure-list"></div>
+        </div>
+      </section>
+
+      <section class="two-col wide-left">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>最近预测</h2>
+              <p>包含回测与实盘记录，按目标日倒序</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table id="pred-table">
+              <thead>
+                <tr>
+                  <th>目标日</th>
+                  <th>方向</th>
+                  <th>概率</th>
+                  <th>预测收盘</th>
+                  <th>实际收盘</th>
+                  <th>结果</th>
+                  <th>失败原因</th>
+                </tr>
+              </thead>
+              <tbody id="pred-tbody">
+                <tr><td colspan="7" class="empty">加载中…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>消息面</h2>
+              <p id="news-summary">新闻情绪 —</p>
+            </div>
+          </div>
+          <div id="news-list" class="news-list"></div>
+        </div>
+      </section>
+
+      <section class="card report-card">
+        <div class="card-head">
+          <div>
+            <h2>每日复盘</h2>
+            <p>自动生成：结算、重训、失败归因与优化动作</p>
+          </div>
+          <span class="badge muted" id="report-date">—</span>
+        </div>
+        <pre id="report-content">等待首次运行…</pre>
+      </section>
+    </main>
+
+    <footer>
+      <span>ETH Oracle v0.1 · 研究用途，不构成投资建议</span>
+      <span>数据：Binance · FRED · DefiLlama · Alternative.me · RSS</span>
+    </footer>
+  </div>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
