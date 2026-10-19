@@ -183,6 +183,41 @@ def classify_failure(
     return categories, reason
 
 
+def _p_value(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "n/a"
+    if number < 0.001:
+        return "<0.001"
+    return f"{number:.3f}"
+
+
+def _sig_label(value: Any, observed: Any, reference: float | None = None) -> str:
+    try:
+        p_value = float(value)
+        rate = float(observed)
+    except (TypeError, ValueError):
+        return "n/a"
+    if p_value >= 0.05:
+        return "不显著"
+    target = 0.5 if reference is None else float(reference)
+    return "显著高于基准" if rate > target else "显著低于基准"
+
+
+def _prediction_lines(prediction: dict[str, Any], title: str) -> list[str]:
+    direction = "上涨" if prediction.get("direction") == "UP" else "下跌"
+    horizon = int(prediction.get("horizon_days") or 1)
+    label = "周" if horizon > 1 else "日"
+    return [
+        f"- {title}：**{prediction.get('as_of_date')} 收盘 → {prediction.get('target_date')} 收盘**（{label}）",
+        f"- 方向：**{direction}**｜上涨概率 {float(prediction.get('prob_up') or 0):.1%}"
+        f"｜置信度 {float(prediction.get('confidence') or 0):.1%}",
+        f"- 预测收盘价：**${float(prediction.get('predicted_close') or 0):,.2f}**"
+        f"（预期 {float(prediction.get('predicted_return') or 0):+.2%}）",
+    ]
+
+
 def build_daily_report(
     *,
     report_date: str,
@@ -195,6 +230,8 @@ def build_daily_report(
     news_items: list[dict[str, Any]],
     refresh_status: dict[str, Any],
     optimization: dict[str, Any],
+    weekly_prediction: dict[str, Any] | None = None,
+    weekly_metrics: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append(f"# ETH Oracle 日报 · {report_date}")
@@ -204,24 +241,24 @@ def build_daily_report(
 
     lines.append("## 下一日预测")
     if latest_prediction:
-        direction = "上涨" if latest_prediction.get("direction") == "UP" else "下跌"
-        lines.append(
-            f"- 预测区间：**{latest_prediction.get('as_of_date')} 收盘 → {latest_prediction.get('target_date')} 收盘**"
-        )
-        lines.append(
-            f"- 方向：**{direction}**｜上涨概率 {float(latest_prediction.get('prob_up') or 0):.1%}"
-            f"｜置信度 {float(latest_prediction.get('confidence') or 0):.1%}"
-        )
-        lines.append(
-            f"- 预测收盘价：**${float(latest_prediction.get('predicted_close') or 0):,.2f}**"
-            f"（预期 {float(latest_prediction.get('predicted_return') or 0):+.2%}）"
-        )
+        lines.extend(_prediction_lines(latest_prediction, "预测区间"))
         drivers = latest_prediction.get("drivers") or []
         if drivers:
             bits = [f"{feature_label(d['feature'])}（{'利多' if d['direction'] == 'up' else '利空'}）" for d in drivers[:5]]
             lines.append("- 主要驱动：" + "、".join(bits))
     else:
         lines.append("- 暂无预测，等待首次运行。")
+    lines.append("")
+
+    lines.append("## 未来 7 天预测")
+    if weekly_prediction:
+        lines.extend(_prediction_lines(weekly_prediction, "预测区间"))
+        drivers = weekly_prediction.get("drivers") or []
+        if drivers:
+            bits = [f"{feature_label(d['feature'])}（{'利多' if d['direction'] == 'up' else '利空'}）" for d in drivers[:5]]
+            lines.append("- 主要驱动：" + "、".join(bits))
+    else:
+        lines.append("- 暂无周预测。")
     lines.append("")
 
     lines.append("## 胜率统计")
@@ -242,14 +279,73 @@ def build_daily_report(
         )
     else:
         lines.append("- 暂无已结算预测。")
+    if weekly_metrics and weekly_metrics.get("n"):
+        lines.append(
+            f"- 周预测：**{weekly_metrics.get('accuracy'):.1%}**（{weekly_metrics.get('n')} 次）"
+            f"｜基线 {weekly_metrics.get('baseline_accuracy'):.1%}｜超额 {weekly_metrics.get('edge'):+.1%}"
+            f"｜Brier {weekly_metrics.get('brier')}"
+        )
+    lines.append("")
+
+    lines.append("## 统计显著性与概率校准")
+    if metrics and metrics.get("n"):
+        significance = metrics.get("significance") or {}
+        calibration = metrics.get("calibration") or {}
+        ci = significance.get("ci95") or [None, None]
+        lines.append(
+            f"- 准确率 {metrics.get('accuracy'):.1%}，95% CI "
+            f"{ci[0]:.1%}–{ci[1]:.1%}，SE {significance.get('se_pp', 'n/a')}pp，n={metrics.get('n')}"
+            if ci[0] is not None and ci[1] is not None
+            else f"- 准确率 {metrics.get('accuracy'):.1%}，n={metrics.get('n')}"
+        )
+        vs_coin = significance.get("vs_coinflip") or {}
+        vs_base = significance.get("vs_baseline") or {}
+        if vs_coin:
+            lines.append(
+                f"- 对随机 50% 的二项检验：p={_p_value(vs_coin.get('p_value'))}"
+                f"（{_sig_label(vs_coin.get('p_value'), metrics.get('accuracy'))}）"
+            )
+        if vs_base:
+            lines.append(
+                f"- 对基线 {metrics.get('baseline_accuracy'):.1%} 的二项检验：p={_p_value(vs_base.get('p_value'))}"
+                f"（{_sig_label(vs_base.get('p_value'), metrics.get('accuracy'), metrics.get('baseline_accuracy'))}）"
+            )
+        if calibration:
+            lines.append(
+                f"- 校准：ECE {calibration.get('ece')}｜Brier skill vs 0.5 "
+                f"{calibration.get('brier_skill_vs_half')}｜平均预测概率 {calibration.get('mean_prob')}"
+                f"｜实际上涨率 {calibration.get('observed_up_rate')}"
+            )
+        if vs_coin and vs_coin.get("p_value") is not None and vs_coin["p_value"] >= 0.05:
+            lines.append("- 解读：当前准确率与随机/基线无法在统计上区分，不应把小幅超额当作稳定优势。")
+        elif vs_coin and vs_coin.get("p_value", 1) < 0.05 and metrics.get("accuracy", 0.5) < 0.5:
+            lines.append("- 解读：当前准确率显著低于随机，模型方向可能系统性地错误，不应直接使用。")
+    else:
+        lines.append("- 暂无足够样本。")
+    if weekly_metrics and weekly_metrics.get("n"):
+        wsig = weekly_metrics.get("significance") or {}
+        wcoin = wsig.get("vs_coinflip") or {}
+        wcal = weekly_metrics.get("calibration") or {}
+        lines.append(
+            f"- 周预测：准确率 {weekly_metrics.get('accuracy'):.1%}，n={weekly_metrics.get('n')}"
+            f"，对随机 50% 的二项检验 p={_p_value(wcoin.get('p_value'))}"
+            f"（{_sig_label(wcoin.get('p_value'), weekly_metrics.get('accuracy'))}）"
+        )
+        if wcal:
+            lines.append(
+                f"- 周校准：ECE {wcal.get('ece')}｜Brier skill vs 0.5 {wcal.get('brier_skill_vs_half')}"
+                f"｜平均预测概率 {wcal.get('mean_prob')}"
+            )
     lines.append("")
 
     lines.append("## 昨日/最近结算复盘")
     if resolved_today:
         for item in resolved_today[:8]:
             mark = "✅" if item.get("correct") == 1 else "❌"
+            horizon = int(item.get("horizon_days") or 1)
+            label = "周" if horizon > 1 else "日"
             lines.append(
-                f"- {mark} 预测 {item.get('as_of_date')} → {item.get('target_date')}："
+                f"- {mark} [{label}] 预测 {item.get('as_of_date')} → {item.get('target_date')}："
                 f"方向 {'上涨' if float(item.get('prob_up') or 0) >= 0.5 else '下跌'}，"
                 f"实际 {float(item.get('actual_return') or 0):+.2%}。{item.get('failure_reason') or ''}"
             )
@@ -299,8 +395,11 @@ def build_daily_report(
     lines.append("## 自动优化动作")
     lines.append(f"- 动态集成权重：{optimization.get('weights')}")
     lines.append(f"- 高置信度阈值：{optimization.get('threshold')}")
+    weekly_optimization = optimization.get("weekly") or {}
+    if weekly_optimization:
+        lines.append(f"- 周模型权重：{weekly_optimization.get('weights')}｜阈值 {weekly_optimization.get('threshold')}")
     lines.append(
-        f"- 流程：结算待定预测 → 重新拉取数据 → 重训模型 → 更新权重/阈值 → 生成下一日预测。"
+        f"- 流程：结算待定预测 → 重新拉取数据 → 重训模型 → 更新权重/阈值 → 生成下一日与未来 7 天预测。"
     )
     lines.append("")
     lines.append("---")

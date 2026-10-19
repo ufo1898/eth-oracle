@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ETH Oracle · 次日方向预测</title>
+  <title>ETH Oracle · 次日与周方向预测</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
         <div class="logo">Ξ</div>
         <div>
           <h1>ETH Oracle</h1>
-          <p>ETH 次日方向预测 · 多因子统计研究</p>
+          <p>ETH 次日 + 未来 7 天方向预测 · 多因子统计研究</p>
         </div>
       </div>
       <div class="top-actions">
@@ -32,7 +32,8 @@
               <p id="chart-sub">最近 240 个已收盘交易日</p>
             </div>
             <div class="legend">
-              <span><i class="dot purple"></i>预测走势</span>
+              <span><i class="dot purple"></i>次日预测</span>
+              <span><i class="dot cyan"></i>周预测</span>
               <span><i class="dot green"></i>预测正确</span>
               <span><i class="dot red"></i>预测错误</span>
             </div>
@@ -43,10 +44,16 @@
         <aside class="card prediction-card" id="prediction-card">
           <div class="card-head">
             <div>
-              <span class="eyebrow">下一日预测</span>
+              <span class="eyebrow" id="pred-eyebrow">下一日预测</span>
               <h2 id="pred-target">等待数据</h2>
             </div>
-            <span id="pred-status" class="pill pending">待结算</span>
+            <div class="pred-head-right">
+              <div class="horizon-tabs" id="horizon-tabs">
+                <button class="horizon-tab active" type="button" data-horizon="1">次日</button>
+                <button class="horizon-tab" type="button" data-horizon="7">未来 7 天</button>
+              </div>
+              <span id="pred-status" class="pill pending">待结算</span>
+            </div>
           </div>
 
           <div class="direction-big" id="pred-direction">—</div>
@@ -102,6 +109,66 @@
           <strong id="stat-strategy">—</strong>
           <small id="stat-sharpe">—</small>
         </div>
+        <div class="stat card">
+          <span>周预测准确率</span>
+          <strong id="stat-weekly-acc">—</strong>
+          <small id="stat-weekly-n">—</small>
+        </div>
+      </section>
+
+      <section class="two-col">
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>统计显著性</h2>
+              <p>二项检验：准确率是否真的高于随机或基线</p>
+            </div>
+            <span id="sig-badge" class="badge muted">—</span>
+          </div>
+          <div id="significance" class="sig-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <div>
+              <h2>可靠性图</h2>
+              <p>预测概率 vs 实际上涨频率；对角线为完美校准</p>
+            </div>
+            <span id="cal-badge" class="badge muted">—</span>
+          </div>
+          <div id="reliability-chart" class="reliability-chart"></div>
+          <div id="cal-stats" class="cal-stats"></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div>
+            <h2>多标的泛化验证</h2>
+            <p>同一套特征与模型流程，在 ETH / BTC / SOL 上分别做样本外走步回测</p>
+          </div>
+          <span id="validation-meta" class="badge muted">未运行</span>
+        </div>
+        <div class="table-wrap">
+          <table id="validation-table">
+            <thead>
+              <tr>
+                <th>标的</th>
+                <th>样本</th>
+                <th>准确率</th>
+                <th>基线</th>
+                <th>超额</th>
+                <th>对随机 p</th>
+                <th>Brier</th>
+                <th>Brier skill</th>
+                <th>ECE</th>
+              </tr>
+            </thead>
+            <tbody id="validation-tbody">
+              <tr><td colspan="9" class="empty">运行 python -m app.validate_assets 生成验证结果</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">如果同一套特征在其他标的上没有优势，说明 ETH 上的小幅超额更可能是过拟合，而不是稳定规律。</p>
       </section>
 
       <section class="two-col">
@@ -140,6 +207,7 @@
               <thead>
                 <tr>
                   <th>目标日</th>
+                  <th>周期</th>
                   <th>方向</th>
                   <th>概率</th>
                   <th>预测收盘</th>
@@ -149,7 +217,7 @@
                 </tr>
               </thead>
               <tbody id="pred-tbody">
-                <tr><td colspan="7" class="empty">加载中…</td></tr>
+                <tr><td colspan="8" class="empty">加载中…</td></tr>
               </tbody>
             </table>
           </div>

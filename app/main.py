@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import threading
 import uuid
@@ -76,10 +77,20 @@ def _metrics_payload() -> dict[str, Any]:
     preds = db.get_predictions(limit=100000)
     live = preds[preds["mode"] == "live"] if not preds.empty else preds
     backtest = preds[preds["mode"] == "backtest"] if not preds.empty else preds
+    weekly = db.get_predictions(limit=100000, horizon_days=config.WEEKLY_HORIZON_DAYS)
+    weekly_live = weekly[weekly["mode"] == "live"] if not weekly.empty else weekly
+    weekly_backtest = weekly[weekly["mode"] == "backtest"] if not weekly.empty else weekly
     return {
         "overall": metrics_summary(preds),
         "live": metrics_summary(live),
         "backtest": metrics_summary(backtest),
+        "weekly": {
+            "overall": metrics_summary(weekly),
+            "live": metrics_summary(weekly_live),
+            "backtest": metrics_summary(weekly_backtest),
+            "threshold": choose_confidence_threshold(weekly, window=52),
+            "counts": db.count_predictions(horizon_days=config.WEEKLY_HORIZON_DAYS),
+        },
         "accuracy_series": accuracy_series(preds, 30),
         "failure_breakdown": failure_breakdown(preds),
         "threshold": choose_confidence_threshold(preds),
@@ -103,12 +114,14 @@ def health() -> dict[str, Any]:
         "data_last_date": str(df["date"].max().date()) if not df.empty else None,
         "db": str(config.DB_PATH),
         "counts": db.count_predictions(),
+        "weekly_counts": db.count_predictions(horizon_days=config.WEEKLY_HORIZON_DAYS),
     }
 
 
 @app.get("/api/overview")
 def overview() -> dict[str, Any]:
     latest = _safe_record(db.get_latest_prediction("live"))
+    latest_weekly = _safe_record(db.get_latest_prediction("live", horizon_days=config.WEEKLY_HORIZON_DAYS))
     model_info = db.get_latest_model_run()
     bundle = load_bundle()
     if bundle is not None and model_info:
@@ -124,6 +137,7 @@ def overview() -> dict[str, Any]:
         {
             "initialized": not preds.empty,
             "latest_prediction": latest,
+            "latest_weekly_prediction": latest_weekly,
             "model": model_info,
             "metrics": metrics,
             "news": {
@@ -185,6 +199,21 @@ def candles(days: int = Query(240, ge=30, le=2000)) -> dict[str, Any]:
             "direction": latest.get("direction"),
             "drivers": latest.get("drivers") or [],
             "model_version": latest.get("model_version"),
+            "horizon_days": latest.get("horizon_days") or 1,
+        }
+    weekly = _safe_record(db.get_latest_prediction("live", horizon_days=config.WEEKLY_HORIZON_DAYS))
+    weekly_prediction = None
+    if weekly:
+        weekly_prediction = {
+            "as_of_date": weekly.get("as_of_date"),
+            "target_date": weekly.get("target_date"),
+            "close": weekly.get("close"),
+            "predicted_close": weekly.get("predicted_close"),
+            "predicted_return": weekly.get("predicted_return"),
+            "prob_up": weekly.get("prob_up"),
+            "confidence": weekly.get("confidence"),
+            "direction": weekly.get("direction"),
+            "horizon_days": weekly.get("horizon_days") or config.WEEKLY_HORIZON_DAYS,
         }
 
     backtest = db.get_predictions(mode="backtest", resolved_only=True, limit=60)
@@ -208,6 +237,7 @@ def candles(days: int = Query(240, ge=30, le=2000)) -> dict[str, Any]:
             "ema20": ema20,
             "ema50": ema50,
             "prediction": prediction,
+            "weekly_prediction": weekly_prediction,
             "markers": markers,
         }
     )
@@ -218,11 +248,13 @@ def predictions(
     mode: str = Query("all", pattern="^(all|live|backtest)$"),
     limit: int = Query(60, ge=1, le=1000),
     resolved_only: bool = False,
+    horizon: str = Query("all", pattern="^(all|1|7)$"),
 ) -> dict[str, Any]:
     df = db.get_predictions(
         None if mode == "all" else mode,
         limit=limit,
         resolved_only=resolved_only,
+        horizon_days=None if horizon == "all" else int(horizon),
     )
     if df.empty:
         return {"items": []}
@@ -310,6 +342,17 @@ def job(job_id: str) -> dict[str, Any]:
     if not job_data:
         raise HTTPException(status_code=404, detail="job not found")
     return _safe(job_data)
+
+
+@app.get("/api/validation")
+def validation() -> dict[str, Any]:
+    path = config.CACHE_DIR / "asset_validation.json"
+    if not path.exists():
+        return {"available": False, "results": [], "note": "运行 python -m app.validate_assets 生成多标的验证结果"}
+    try:
+        return {"available": True, **_safe(json.loads(path.read_text(encoding="utf-8")))}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "results": [], "error": str(exc)}
 
 
 @app.get("/api/model")

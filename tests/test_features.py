@@ -26,6 +26,16 @@ def test_target_is_next_day_close(synthetic_ohlcv: pd.DataFrame) -> None:
     assert features["target_up"].dropna().isin([0.0, 1.0]).all()
 
 
+def test_weekly_target_is_seven_days_ahead(synthetic_ohlcv: pd.DataFrame) -> None:
+    features = build_features(synthetic_ohlcv)
+    index = len(features) - 8
+    expected = synthetic_ohlcv["close"].iloc[index + 7] / synthetic_ohlcv["close"].iloc[index] - 1
+    assert features["target_ret_7d"].iloc[index] == expected
+    assert features["target_up_7d"].iloc[index] == int(expected > 0)
+    assert features["target_ret_7d"].iloc[-7:].isna().all()
+    assert features["target_up_7d"].iloc[-7:].isna().all()
+
+
 def test_no_infinite_values_in_features(synthetic_features: pd.DataFrame) -> None:
     numeric = synthetic_features.select_dtypes(include=[np.number])
     assert not np.isinf(numeric.to_numpy()).any()

@@ -10,6 +10,7 @@
     ema20Series: null,
     ema50Series: null,
     predictionSeries: null,
+    weeklyPredictionSeries: null,
     accuracyChart: null,
     accuracySeries: null,
     cumulativeSeries: null,
@@ -17,6 +18,9 @@
     loading: false,
     updating: false,
     lastLoaded: null,
+    latestPrediction: null,
+    latestPredictions: { 1: null, 7: null },
+    horizon: 1,
   };
 
   const FEATURE_LABELS = {
@@ -218,7 +222,16 @@
       priceLineVisible: false,
       lastValueVisible: true,
       crosshairMarkerVisible: true,
-      title: "预测",
+      title: "次日预测",
+    });
+    state.weeklyPredictionSeries = chart.addLineSeries({
+      color: "#22d3ee",
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: true,
+      title: "周预测",
     });
 
     const resize = () => chart.applyOptions({ width: container.clientWidth, height: container.clientHeight });
@@ -306,15 +319,33 @@
       modelBadge.textContent = "模型未训练";
     }
 
-    const card = $("#prediction-card");
+    state.latestPrediction = latest || null;
+    state.latestPredictions = {
+      1: data.latest_prediction || null,
+      7: data.latest_weekly_prediction || null,
+    };
+    renderPredictionCard();
+  }
+
+  function renderPredictionCard() {
+    const latest = state.horizon === 7
+      ? state.latestPredictions[7]
+      : (state.latestPredictions[1] || state.latestPrediction);
+    const weekly = state.horizon === 7;
     const directionEl = $("#pred-direction");
     const statusEl = $("#pred-status");
+    $("#pred-eyebrow").textContent = weekly ? "未来 7 天预测" : "下一日预测";
+    document.querySelectorAll(".horizon-tab").forEach((tab) => {
+      tab.classList.toggle("active", Number(tab.dataset.horizon) === state.horizon);
+    });
     if (!latest) {
       directionEl.textContent = "—";
       directionEl.className = "direction-big";
-      $("#pred-target").textContent = "等待首次运行";
-      $("#pred-range").textContent = "点击右上角“立即更新”生成预测";
-      statusEl.textContent = "未初始化";
+      $("#pred-target").textContent = weekly ? "周预测尚未生成" : "等待首次运行";
+      $("#pred-range").textContent = weekly
+        ? "每日任务运行后生成 7 天方向预测"
+        : "点击右上角“立即更新”生成预测";
+      statusEl.textContent = weekly ? "无周预测" : "未初始化";
       statusEl.className = "pill pending";
       ["#pred-prob", "#pred-confidence", "#pred-close", "#pred-predicted-close"].forEach((selector) => {
         $(selector).textContent = "—";
@@ -330,8 +361,10 @@
     directionEl.textContent = isUp ? "上涨" : "下跌";
     directionEl.className = `direction-big ${isUp ? "up" : "down"}`;
     $("#pred-target").textContent = `预测 ${shortDate(latest.target_date)} 收盘`;
-    $("#pred-range").textContent = `${shortDate(latest.as_of_date)} 收盘 → ${shortDate(latest.target_date)} 收盘 · UTC`;
-    statusEl.textContent = latest.status === "resolved" ? (latest.correct ? "已结算 · 正确" : "已结算 · 错误") : "待结算";
+    $("#pred-range").textContent = `${shortDate(latest.as_of_date)} 收盘 → ${shortDate(latest.target_date)} 收盘 · ${weekly ? "7 天" : "次日"} · UTC`;
+    statusEl.textContent = latest.status === "resolved"
+      ? `已结算 · ${latest.correct ? "正确" : "错误"}`
+      : "待结算";
     statusEl.className = `pill ${latest.status === "resolved" ? (latest.correct ? "win" : "loss") : "pending"}`;
 
     $("#pred-prob").textContent = pct(latest.prob_up, 1);
@@ -374,6 +407,173 @@
     setText("#stat-strategy", overall.strategy && overall.strategy.cumulative_return != null ? signedPct(overall.strategy.cumulative_return, 1) : "—");
     $("#stat-strategy").className = overall.strategy && overall.strategy.cumulative_return >= 0 ? "good" : overall.strategy ? "bad" : "";
     setText("#stat-sharpe", overall.strategy && overall.strategy.sharpe != null ? `Sharpe ${num(overall.strategy.sharpe, 2)}` : "多空日频策略");
+
+    const weekly = (metrics.weekly && metrics.weekly.overall) || {};
+    setText("#stat-weekly-acc", weekly.accuracy == null ? "—" : pct(weekly.accuracy));
+    $("#stat-weekly-acc").className = accuracyClass(weekly.accuracy);
+    setText("#stat-weekly-n", weekly.n
+      ? `${weekly.n} 次 · 基线 ${pct(weekly.baseline_accuracy)}`
+      : "样本不足");
+  }
+
+  function pText(value) {
+    if (value == null) return "—";
+    if (Number(value) < 0.001) return "<0.001";
+    return Number(value).toFixed(3);
+  }
+
+  function renderSignificance(metrics) {
+    const overall = metrics.overall || {};
+    const sig = overall.significance || {};
+    const container = $("#significance");
+    const badge = $("#sig-badge");
+    if (!container) return;
+    if (!sig.n) {
+      container.innerHTML = '<div class="empty">暂无已结算样本</div>';
+      if (badge) { badge.textContent = "样本不足"; badge.className = "badge muted"; }
+      return;
+    }
+    const ci = sig.ci95 || [];
+    const vsCoin = sig.vs_coinflip || {};
+    const vsBase = sig.vs_baseline || {};
+    const edge = Number(overall.edge || 0);
+    const pValue = vsCoin.p_value == null ? null : Number(vsCoin.p_value);
+    const significant = edge > 0 && pValue != null && pValue < 0.05;
+    const negative = edge < 0 && pValue != null && pValue < 0.05;
+    const pClass = (value, positive) => {
+      if (value == null) return "";
+      if (Number(value) < 0.05) return positive ? "good" : "bad";
+      return "";
+    };
+    const rows = [
+      ["准确率（95% Wilson CI）", ci.length === 2 ? `${pct(overall.accuracy)}　[${pct(ci[0])}, ${pct(ci[1])}]` : pct(overall.accuracy)],
+      ["标准误 SE", sig.se_pp == null ? "—" : `${num(sig.se_pp, 2)} pp`],
+      ["对随机 50%", `p = ${pText(vsCoin.p_value)}`],
+      [`对基线 ${pct(overall.baseline_accuracy)}`, `p = ${pText(vsBase.p_value)}`],
+      ["样本量", `${sig.n} 次已结算`],
+    ];
+    const weeklyOverall = (metrics.weekly && metrics.weekly.overall) || {};
+    const weeklySig = weeklyOverall.significance || {};
+    const weeklyCoin = weeklySig.vs_coinflip || {};
+    if (weeklySig.n) {
+      rows.push([
+        `周预测（n=${weeklySig.n}）`,
+        `${pct(weeklyOverall.accuracy)} · p = ${pText(weeklyCoin.p_value)}`,
+      ]);
+    }
+    container.innerHTML = rows.map(([name, value], index) => {
+      let cls = "";
+      if (index === 2 || index === 3) cls = pClass(vsCoin.p_value, edge > 0);
+      if (index === 5 && weeklyCoin.p_value != null) {
+        const weeklyEdge = Number(weeklyOverall.edge || 0);
+        cls = pClass(weeklyCoin.p_value, weeklyEdge > 0);
+      }
+      return `<div class="sig-row"><span>${name}</span><strong class="${cls}">${value}</strong></div>`;
+    }).join("") + `<p class="sig-note ${significant ? "" : "warn"}">${significant
+      ? `准确率显著高于随机（p &lt; 0.05），但仍需持续样本外验证。`
+      : negative
+        ? `准确率显著低于随机（p = ${pText(vsCoin.p_value)}），模型方向可能系统性错误，请勿直接使用。`
+        : `p ≥ 0.05：当前 ${signedPct(edge, 1)} 的超额与零无法区分，不能视为稳定优势。`}</p>`;
+    if (badge) {
+      badge.textContent = significant ? "显著高于随机" : negative ? "显著低于随机" : "不显著";
+      badge.className = significant ? "badge" : "badge warn";
+    }
+  }
+
+  function renderReliability(metrics) {
+    const overall = metrics.overall || {};
+    const cal = overall.calibration || {};
+    const container = $("#reliability-chart");
+    if (!container) return;
+    const bins = (cal.bins || []).filter((bin) => bin.n > 0 && bin.mean_prob != null && bin.observed_up != null);
+    if (!bins.length) {
+      container.innerHTML = '<div class="empty">暂无校准数据</div>';
+    } else {
+      const W = 460;
+      const H = 250;
+      const pad = { left: 40, right: 14, top: 12, bottom: 34 };
+      const x = (value) => pad.left + value * (W - pad.left - pad.right);
+      const y = (value) => H - pad.bottom - value * (H - pad.top - pad.bottom);
+      const grid = [0, 0.25, 0.5, 0.75, 1].map((tick) => {
+        const lines = [];
+        lines.push(`<line x1="${x(tick)}" y1="${y(0)}" x2="${x(tick)}" y2="${y(1)}" stroke="rgba(148,163,184,0.10)" />`);
+        lines.push(`<line x1="${x(0)}" y1="${y(tick)}" x2="${x(1)}" y2="${y(tick)}" stroke="rgba(148,163,184,0.10)" />`);
+        lines.push(`<text x="${x(tick)}" y="${H - pad.bottom + 14}" fill="#64748b" font-size="9" text-anchor="middle">${Math.round(tick * 100)}%</text>`);
+        if (tick > 0) lines.push(`<text x="${pad.left - 8}" y="${y(tick) + 3}" fill="#64748b" font-size="9" text-anchor="end">${Math.round(tick * 100)}%</text>`);
+        return lines.join("");
+      }).join("");
+      const points = bins.map((bin) => {
+        const cx = x(Number(bin.mean_prob));
+        const cy = y(Number(bin.observed_up));
+        const hi = bin.ci95 ? y(Number(bin.ci95[1])) : cy;
+        const lo = bin.ci95 ? y(Number(bin.ci95[0])) : cy;
+        const radius = Math.min(9, 3.5 + Math.sqrt(Number(bin.n)) * 1.2);
+        return `<line x1="${cx}" y1="${lo}" x2="${cx}" y2="${hi}" stroke="rgba(34,211,238,0.45)" stroke-width="1.5" />`
+          + `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="rgba(34,211,238,0.22)" stroke="#22d3ee" stroke-width="2">`
+          + `<title>预测 ${pct(bin.mean_prob, 1)} · 实际 ${pct(bin.observed_up, 1)} · n=${bin.n}</title></circle>`;
+      }).join("");
+      container.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="可靠性图">
+        ${grid}
+        <line x1="${x(0)}" y1="${y(0)}" x2="${x(1)}" y2="${y(1)}" stroke="rgba(168,85,247,0.6)" stroke-dasharray="5 4" />
+        ${points}
+        <text x="${(x(0) + x(1)) / 2}" y="${H - 4}" fill="#8b9bb4" font-size="10" text-anchor="middle">预测上涨概率</text>
+        <text x="10" y="${(y(0) + y(1)) / 2}" fill="#8b9bb4" font-size="10" text-anchor="middle" transform="rotate(-90 10 ${(y(0) + y(1)) / 2})">实际上涨频率</text>
+      </svg>`;
+    }
+    const stats = $("#cal-stats");
+    if (stats) {
+      stats.innerHTML = [
+        ["ECE", cal.ece == null ? "—" : num(cal.ece, 3)],
+        ["Brier skill", cal.brier_skill_vs_half == null ? "—" : num(cal.brier_skill_vs_half, 3)],
+        ["Sharpness", cal.sharpness == null ? "—" : num(cal.sharpness, 3)],
+        ["平均概率", cal.mean_prob == null ? "—" : pct(cal.mean_prob, 1)],
+      ].map(([name, value]) => `<div><span>${name}</span><b>${value}</b></div>`).join("");
+    }
+    const badge = $("#cal-badge");
+    if (badge) {
+      if (cal.ece == null) {
+        badge.textContent = "无数据";
+        badge.className = "badge muted";
+      } else {
+        const weak = cal.sharpness != null && Number(cal.sharpness) < 0.03;
+        badge.textContent = weak ? "区分度很弱" : `ECE ${num(cal.ece, 3)}`;
+        badge.className = weak ? "badge warn" : "badge muted";
+      }
+    }
+  }
+
+  function renderValidation(data) {
+    const tbody = $("#validation-tbody");
+    const meta = $("#validation-meta");
+    if (!tbody) return;
+    const results = (data && data.results) || [];
+    if (!results.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="empty">运行 python -m app.validate_assets 生成验证结果</td></tr>';
+      if (meta) { meta.textContent = "未运行"; meta.className = "badge muted"; }
+      return;
+    }
+    tbody.innerHTML = results.map((item) => {
+      const sig = item.significance || {};
+      const vsCoin = sig.vs_coinflip || {};
+      const cal = item.calibration || {};
+      const edge = Number(item.edge || 0);
+      const pValue = vsCoin.p_value == null ? "—" : Number(vsCoin.p_value) < 0.001 ? "<0.001" : Number(vsCoin.p_value).toFixed(3);
+      return `<tr>
+        <td>${escapeHtml(item.label || item.symbol)}</td>
+        <td class="num">${item.n ?? "—"}</td>
+        <td class="num">${pct(item.accuracy)}</td>
+        <td class="num">${pct(item.baseline_accuracy)}</td>
+        <td class="num"><span class="${edge >= 0 ? "tag up" : "tag down"}">${signedPct(edge, 1)}</span></td>
+        <td class="num">${pValue}</td>
+        <td class="num">${num(item.brier, 3)}</td>
+        <td class="num">${num(cal.brier_skill_vs_half, 3)}</td>
+        <td class="num">${num(cal.ece, 3)}</td>
+      </tr>`;
+    }).join("");
+    if (meta) {
+      meta.textContent = `${data.days || "—"} 天走步 · ${shortDate(data.generated_at)}`;
+      meta.className = "badge muted";
+    }
   }
 
   function renderPriceChart(data) {
@@ -400,14 +600,26 @@
     if (data.ema50) state.ema50Series.setData(data.ema50);
 
     const prediction = data.prediction;
+    const weekly = data.weekly_prediction;
     if (prediction && prediction.as_of_date && prediction.predicted_close != null) {
       state.predictionSeries.setData([
         { time: prediction.as_of_date, value: prediction.close },
         { time: prediction.target_date, value: prediction.predicted_close },
       ]);
-      $("#chart-sub").textContent = `预测 ${shortDate(prediction.as_of_date)} → ${shortDate(prediction.target_date)} · 紫色虚线`;
     } else {
       state.predictionSeries.setData([]);
+    }
+    if (weekly && weekly.as_of_date && weekly.predicted_close != null) {
+      state.weeklyPredictionSeries.setData([
+        { time: weekly.as_of_date, value: weekly.close },
+        { time: weekly.target_date, value: weekly.predicted_close },
+      ]);
+    } else {
+      state.weeklyPredictionSeries.setData([]);
+    }
+    if (prediction && prediction.as_of_date && prediction.predicted_close != null) {
+      $("#chart-sub").textContent = `次日 ${shortDate(prediction.target_date)} · 周 ${weekly ? shortDate(weekly.target_date) : "—"} · 紫/青虚线`;
+    } else {
       $("#chart-sub").textContent = "最近 240 个已收盘交易日";
     }
 
@@ -468,18 +680,20 @@
     const tbody = $("#pred-tbody");
     const items = data.items || [];
     if (!items.length) {
-      tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无预测记录</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="empty">暂无预测记录</td></tr>';
       return;
     }
     tbody.innerHTML = items.slice(0, 40).map((item) => {
       const isUp = String(item.direction).toUpperCase() === "UP";
       const resolved = item.status === "resolved";
+      const weekly = Number(item.horizon_days) === 7;
       const resultClass = resolved ? (item.correct ? "win" : "loss") : "pending";
       const resultText = resolved ? (item.correct ? "正确" : "错误") : "待结算";
       const reason = item.failure_reason || (resolved ? "—" : "等待目标日收盘后结算");
       return `
         <tr>
           <td>${shortDate(item.target_date)}<div class="muted" style="font-size:10px">${item.mode === "live" ? "实盘" : "回测"}</div></td>
+          <td><span class="tag ${weekly ? "weekly" : ""}">${weekly ? "周" : "次日"}</span></td>
           <td><span class="tag ${isUp ? "up" : "down"}">${isUp ? "涨" : "跌"}</span></td>
           <td class="num">${pct(item.prob_up, 1)}</td>
           <td class="num">${money(item.predicted_close)}</td>
@@ -542,18 +756,22 @@
         getJSON("/api/news?limit=50"),
         getJSON("/api/report"),
         getJSON("/api/predictions?mode=all&limit=80"),
+        getJSON("/api/validation"),
       ]);
-      const [overview, candles, metrics, failures, news, report, predictions] = results;
+      const [overview, candles, metrics, failures, news, report, predictions, validation] = results;
       if (overview.status === "fulfilled") renderOverview(overview.value);
       if (candles.status === "fulfilled") renderPriceChart(candles.value);
       if (metrics.status === "fulfilled") {
         renderStats(metrics.value);
         renderAccuracyChart(metrics.value);
+        renderSignificance(metrics.value);
+        renderReliability(metrics.value);
       }
       if (failures.status === "fulfilled") renderFailures(failures.value);
       if (news.status === "fulfilled") renderNews(news.value);
       if (report.status === "fulfilled") renderReport(report.value);
       if (predictions.status === "fulfilled") renderPredictions(predictions.value);
+      if (validation.status === "fulfilled") renderValidation(validation.value);
       const errors = results.filter((result) => result.status === "rejected");
       if (errors.length && showErrors) {
         toast(`部分数据加载失败：${errors[0].reason.message}`, "error");
@@ -602,6 +820,12 @@
     initPriceChart();
     initAccuracyChart();
     $("#refresh-btn").addEventListener("click", runUpdate);
+    document.querySelectorAll(".horizon-tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        state.horizon = Number(tab.dataset.horizon) === 7 ? 7 : 1;
+        renderPredictionCard();
+      });
+    });
     loadAll();
     window.setInterval(() => {
       if (!state.updating && document.visibilityState === "visible") loadAll(false);

@@ -67,6 +67,7 @@ class ModelBundle:
     n_samples: int
     val_metrics: dict[str, Any] = field(default_factory=dict)
     params: dict[str, Any] = field(default_factory=dict)
+    horizon_days: int = 1
 
     def info(self) -> dict[str, Any]:
         return {
@@ -80,6 +81,7 @@ class ModelBundle:
             "weights": self.weights,
             "val_metrics": self.val_metrics,
             "params": self.params,
+            "horizon_days": self.horizon_days,
         }
 
 
@@ -173,16 +175,21 @@ def train_bundle(
     validation_days: int = 120,
     candidates: list[str] | None = None,
     weight_override: dict[str, float] | None = None,
+    target_col: str = "target_up",
+    target_ret_col: str = "target_ret",
+    horizon_days: int = 1,
 ) -> ModelBundle:
     """Train on information available strictly before the prediction day.
 
-    `as_of` is the feature day used to predict the next close. Training can only
-    use rows whose next-day target is known, i.e. dates <= as_of - 1 day.
+    `as_of` is the feature day used to predict a future close `horizon_days`
+    later. Training can only use rows whose target is known, i.e. dates
+    <= as_of - horizon_days.
     """
     params = {**DEFAULT_PARAMS, **(params or {})}
+    horizon_days = max(int(horizon_days), 1)
     as_of_ts = pd.Timestamp(as_of).normalize()
-    train_end = as_of_ts - pd.Timedelta(days=1)
-    train_df = df[(df["date"] <= train_end) & df["target_up"].notna()].copy()
+    train_end = as_of_ts - pd.Timedelta(days=horizon_days)
+    train_df = df[(df["date"] <= train_end) & df[target_col].notna()].copy()
     if len(train_df) < config.MIN_TRAIN_ROWS:
         raise ValueError(f"Not enough training rows: {len(train_df)} < {config.MIN_TRAIN_ROWS}")
 
@@ -192,10 +199,10 @@ def train_bundle(
         raise ValueError("Too few usable features after coverage filtering")
 
     X_raw = train_df[feature_cols].apply(pd.to_numeric, errors="coerce")
-    y = train_df["target_up"].astype(int).to_numpy()
+    y = train_df[target_col].astype(int).to_numpy()
     if len(np.unique(y)) < 2:
         raise ValueError("Training data contains only one target class")
-    y_ret = train_df["target_ret"].astype(float).to_numpy()
+    y_ret = train_df[target_ret_col].astype(float).to_numpy()
 
     val_n = min(validation_days, max(60, len(train_df) // 4))
     fit_n = len(train_df) - val_n
@@ -274,6 +281,8 @@ def train_bundle(
         "base_up_rate": float(np.mean(y_val)),
     }
     version = datetime.now(timezone.utc).strftime("v%Y%m%d-%H%M%S")
+    if horizon_days != 1:
+        version = f"{version}-h{horizon_days}"
     bundle = ModelBundle(
         feature_cols=feature_cols,
         imputer=imputer,
@@ -293,10 +302,12 @@ def train_bundle(
         n_samples=int(len(train_df)),
         val_metrics=val_metrics,
         params=params,
+        horizon_days=horizon_days,
     )
     log.info(
-        "Trained %s: rows=%s features=%s val_acc=%.3f weights=%s",
+        "Trained %s (horizon=%sd): rows=%s features=%s val_acc=%.3f weights=%s",
         version,
+        horizon_days,
         len(train_df),
         len(feature_cols),
         val_metrics["accuracy"],
@@ -386,19 +397,21 @@ def top_drivers(bundle: ModelBundle, feature_row: pd.Series, k: int = 6) -> list
     return drivers[:k]
 
 
-def save_bundle(bundle: ModelBundle) -> Path:
+def save_bundle(bundle: ModelBundle, path: Path | None = None) -> Path:
     config.MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(bundle, config.MODEL_LATEST)
+    target = path or config.MODEL_LATEST
+    joblib.dump(bundle, target)
     versioned = config.MODEL_DIR / f"model_{bundle.version}.joblib"
     joblib.dump(bundle, versioned)
-    return config.MODEL_LATEST
+    return target
 
 
-def load_bundle() -> ModelBundle | None:
-    if not config.MODEL_LATEST.exists():
+def load_bundle(path: Path | None = None) -> ModelBundle | None:
+    target = path or config.MODEL_LATEST
+    if not target.exists():
         return None
     try:
-        return joblib.load(config.MODEL_LATEST)
+        return joblib.load(target)
     except Exception as exc:  # noqa: BLE001
         log.warning("Could not load model bundle: %s", exc)
         return None

@@ -104,6 +104,14 @@ def test_predictions_endpoint(client: TestClient) -> None:
     assert items[0]["features"] == {"rsi_14": 50.0}
 
 
+def test_validation_endpoint_without_results(client: TestClient) -> None:
+    response = client.get("/api/validation")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is False
+    assert payload["results"] == []
+
+
 def test_job_not_found(client: TestClient) -> None:
     assert client.get("/api/job/does-not-exist").status_code == 404
 

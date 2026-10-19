@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     target_up INTEGER,
     correct INTEGER,
     status TEXT NOT NULL DEFAULT 'pending',
+    horizon_days INTEGER NOT NULL DEFAULT 1,
     model_version TEXT,
     features_json TEXT,
     drivers_json TEXT,
@@ -41,11 +42,12 @@ CREATE TABLE IF NOT EXISTS predictions (
     failure_reason TEXT,
     news_score REAL,
     resolved_at TEXT,
-    UNIQUE(mode, as_of_date)
+    UNIQUE(mode, as_of_date, horizon_days)
 );
 
 CREATE INDEX IF NOT EXISTS idx_predictions_target ON predictions(target_date);
 CREATE INDEX IF NOT EXISTS idx_predictions_status ON predictions(status);
+CREATE INDEX IF NOT EXISTS idx_predictions_horizon ON predictions(horizon_days);
 
 CREATE TABLE IF NOT EXISTS model_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,8 +96,66 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+MIGRATION_COLUMNS = [
+    "id",
+    "mode",
+    "as_of_date",
+    "target_date",
+    "created_at",
+    "updated_at",
+    "close",
+    "predicted_close",
+    "predicted_return",
+    "prob_up",
+    "prob_raw",
+    "direction",
+    "confidence",
+    "p_hgb",
+    "p_rf",
+    "p_et",
+    "p_lr",
+    "actual_close",
+    "actual_return",
+    "target_up",
+    "correct",
+    "status",
+    "model_version",
+    "features_json",
+    "drivers_json",
+    "failure_categories_json",
+    "failure_reason",
+    "news_score",
+    "resolved_at",
+]
+
+
+def _migrate_add_horizon(conn: sqlite3.Connection) -> None:
+    conn.executescript(
+        """
+        DROP INDEX IF EXISTS idx_predictions_target;
+        DROP INDEX IF EXISTS idx_predictions_status;
+        DROP INDEX IF EXISTS idx_predictions_horizon;
+        ALTER TABLE predictions RENAME TO predictions_old;
+        """
+    )
+    conn.executescript(SCHEMA)
+    columns = ", ".join(MIGRATION_COLUMNS)
+    conn.execute(
+        f"INSERT INTO predictions ({columns}, horizon_days) "
+        f"SELECT {columns}, 1 FROM predictions_old"
+    )
+    conn.execute("DROP TABLE predictions_old")
+
+
 def init_db() -> None:
     with _connect() as conn:
+        existing = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='predictions'"
+        ).fetchone()
+        if existing:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(predictions)")}
+            if "horizon_days" not in columns:
+                _migrate_add_horizon(conn)
         conn.executescript(SCHEMA)
 
 
@@ -151,6 +211,7 @@ def upsert_prediction(record: dict[str, Any]) -> int:
         "target_up": record.get("target_up"),
         "correct": record.get("correct"),
         "status": record.get("status", "pending"),
+        "horizon_days": int(record.get("horizon_days") or 1),
         "model_version": record.get("model_version"),
         "features_json": _safe_json(record.get("features") or {}),
         "drivers_json": _safe_json(record.get("drivers") or []),
@@ -161,16 +222,20 @@ def upsert_prediction(record: dict[str, Any]) -> int:
     }
     columns = ", ".join(payload.keys())
     placeholders = ", ".join(["?"] * len(payload))
-    updates = ", ".join(f"{key}=excluded.{key}" for key in payload.keys() if key not in ("mode", "as_of_date", "created_at"))
+    updates = ", ".join(
+        f"{key}=excluded.{key}"
+        for key in payload.keys()
+        if key not in ("mode", "as_of_date", "horizon_days", "created_at")
+    )
     sql = (
         f"INSERT INTO predictions ({columns}) VALUES ({placeholders}) "
-        f"ON CONFLICT(mode, as_of_date) DO UPDATE SET {updates}"
+        f"ON CONFLICT(mode, as_of_date, horizon_days) DO UPDATE SET {updates}"
     )
     with _connect() as conn:
         cur = conn.execute(sql, list(payload.values()))
         row = conn.execute(
-            "SELECT id FROM predictions WHERE mode=? AND as_of_date=?",
-            (payload["mode"], payload["as_of_date"]),
+            "SELECT id FROM predictions WHERE mode=? AND as_of_date=? AND horizon_days=?",
+            (payload["mode"], payload["as_of_date"], payload["horizon_days"]),
         ).fetchone()
         return int(row["id"]) if row else int(cur.lastrowid or 0)
 
@@ -181,12 +246,16 @@ def get_predictions(
     limit: int = 500,
     resolved_only: bool = False,
     pending_only: bool = False,
+    horizon_days: int | None = 1,
 ) -> pd.DataFrame:
     clauses: list[str] = []
     params: list[Any] = []
     if mode:
         clauses.append("mode = ?")
         params.append(mode)
+    if horizon_days is not None:
+        clauses.append("horizon_days = ?")
+        params.append(int(horizon_days))
     if resolved_only:
         clauses.append("status = 'resolved'")
     if pending_only:
@@ -199,18 +268,27 @@ def get_predictions(
     return df
 
 
-def get_latest_prediction(mode: str = "live") -> dict[str, Any] | None:
+def get_latest_prediction(mode: str = "live", horizon_days: int = 1) -> dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT * FROM predictions WHERE mode=? ORDER BY target_date DESC, id DESC LIMIT 1",
-            (mode,),
+            "SELECT * FROM predictions WHERE mode=? AND horizon_days=? ORDER BY target_date DESC, id DESC LIMIT 1",
+            (mode, int(horizon_days)),
         ).fetchone()
     return _decode_row(row)
 
 
-def get_pending_predictions() -> list[dict[str, Any]]:
-    with _connect() as conn:
-        rows = conn.execute("SELECT * FROM predictions WHERE status='pending' ORDER BY target_date").fetchall()
+def get_pending_predictions(horizon_days: int | None = None) -> list[dict[str, Any]]:
+    if horizon_days is None:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM predictions WHERE status='pending' ORDER BY target_date"
+            ).fetchall()
+    else:
+        with _connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM predictions WHERE status='pending' AND horizon_days=? ORDER BY target_date",
+                (int(horizon_days),),
+            ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -351,18 +429,32 @@ def get_latest_report() -> dict[str, Any] | None:
     return data
 
 
-def count_predictions() -> dict[str, int]:
+def count_predictions(horizon_days: int | None = 1) -> dict[str, int]:
     with _connect() as conn:
-        rows = conn.execute("SELECT mode, status, COUNT(*) AS n FROM predictions GROUP BY mode, status").fetchall()
+        if horizon_days is None:
+            rows = conn.execute(
+                "SELECT mode, status, COUNT(*) AS n FROM predictions GROUP BY mode, status"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT mode, status, COUNT(*) AS n FROM predictions WHERE horizon_days=? GROUP BY mode, status",
+                (int(horizon_days),),
+            ).fetchall()
     return {f"{row['mode']}:{row['status']}": int(row["n"]) for row in rows}
 
 
-def clear_predictions(mode: str | None = None) -> None:
+def clear_predictions(mode: str | None = None, horizon_days: int | None = None) -> None:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if mode:
+        clauses.append("mode=?")
+        params.append(mode)
+    if horizon_days is not None:
+        clauses.append("horizon_days=?")
+        params.append(int(horizon_days))
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with _connect() as conn:
-        if mode:
-            conn.execute("DELETE FROM predictions WHERE mode=?", (mode,))
-        else:
-            conn.execute("DELETE FROM predictions")
+        conn.execute(f"DELETE FROM predictions {where}", params)
 
 
 def _loads(raw: str | None) -> Any:

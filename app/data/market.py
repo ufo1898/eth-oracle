@@ -184,14 +184,14 @@ def load_market() -> tuple[dict[str, pd.DataFrame], list[dict[str, Any]]]:
     return frames, statuses
 
 
-def fetch_funding(start_date: str = "2019-01-01") -> pd.DataFrame:
+def fetch_funding(start_date: str = "2019-01-01", symbol: str = "ETHUSDT") -> pd.DataFrame:
     cursor = _date_ms(start_date)
     now_ms = _now_ms()
     rows: list[dict[str, Any]] = []
     while cursor < now_ms:
         payload = get_json(
             FUNDING_URL,
-            params={"symbol": "ETHUSDT", "startTime": cursor, "limit": 1000},
+            params={"symbol": symbol, "startTime": cursor, "limit": 1000},
             timeout=25,
             retries=3,
         )
@@ -231,14 +231,15 @@ def fetch_funding(start_date: str = "2019-01-01") -> pd.DataFrame:
     return grouped.reset_index(drop=True)
 
 
-def update_funding() -> tuple[pd.DataFrame, dict[str, Any]]:
-    path = _cache_path("ETHUSDT_funding")
+def update_funding(symbol: str = "ETHUSDT") -> tuple[pd.DataFrame, dict[str, Any]]:
+    path = _cache_path(f"{symbol}_funding")
     cached = _read_cache(path)
     start_date = "2019-01-01"
     if cached is not None and not cached.empty:
         start_date = (cached["date"].max() - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+    source_name = f"binance:{symbol}_funding"
     try:
-        fresh = fetch_funding(start_date)
+        fresh = fetch_funding(start_date, symbol=symbol)
         if cached is not None and not cached.empty:
             merged = pd.concat([cached, fresh], ignore_index=True)
             merged = merged.drop_duplicates(subset=["date"], keep="last").sort_values("date")
@@ -247,7 +248,7 @@ def update_funding() -> tuple[pd.DataFrame, dict[str, Any]]:
         merged = merged.reset_index(drop=True)
         _atomic_csv(merged, path)
         return merged, {
-            "source": "binance:ETHUSDT_funding",
+            "source": source_name,
             "ok": True,
             "rows": int(len(merged)),
             "last_date": str(merged["date"].max().date()) if not merged.empty else None,
@@ -257,7 +258,7 @@ def update_funding() -> tuple[pd.DataFrame, dict[str, Any]]:
         if cached is not None and not cached.empty:
             log.warning("Funding refresh failed, using stale cache: %s", exc)
             return cached, {
-                "source": "binance:ETHUSDT_funding",
+                "source": source_name,
                 "ok": False,
                 "error": str(exc),
                 "rows": int(len(cached)),
@@ -266,7 +267,7 @@ def update_funding() -> tuple[pd.DataFrame, dict[str, Any]]:
             }
         log.warning("Funding data unavailable: %s", exc)
         return pd.DataFrame(), {
-            "source": "binance:ETHUSDT_funding",
+            "source": source_name,
             "ok": False,
             "error": str(exc),
             "rows": 0,

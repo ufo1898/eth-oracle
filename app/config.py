@@ -25,7 +25,10 @@ PORT = int(os.environ.get("ETORACLE_PORT", "8787"))
 DATASET_CSV = CACHE_DIR / "dataset.csv"
 LAST_REFRESH_JSON = CACHE_DIR / "last_refresh.json"
 MODEL_LATEST = MODEL_DIR / "model_latest.joblib"
+MODEL_WEEKLY_LATEST = MODEL_DIR / "model_weekly_latest.joblib"
 BACKTEST_DAYS_DEFAULT = int(os.environ.get("ETORACLE_BACKTEST_DAYS", "365"))
+WEEKLY_HORIZON_DAYS = 7
+WEEKLY_BACKTEST_DAYS = int(os.environ.get("ETORACLE_WEEKLY_BACKTEST_DAYS", "365"))
 MIN_TRAIN_ROWS = int(os.environ.get("ETORACLE_MIN_TRAIN_ROWS", "420"))
 RETRAIN_DAYS = int(os.environ.get("ETORACLE_RETRAIN_DAYS", "30"))
 # GDELT is optional and aggressively rate-limited. Disabled by default so the

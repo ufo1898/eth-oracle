@@ -49,6 +49,9 @@ RAW_COLUMNS = {
     "next_close",
     "target_ret",
     "target_up",
+    "close_7d",
+    "target_ret_7d",
+    "target_up_7d",
 }
 
 
@@ -378,6 +381,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     df["target_ret"] = df["next_close"] / close - 1
     df["target_up"] = (df["target_ret"] > 0).astype(float)
     df.loc[df["target_ret"].isna(), "target_up"] = np.nan
+
+    df["close_7d"] = close.shift(-7)
+    df["target_ret_7d"] = df["close_7d"] / close - 1
+    df["target_up_7d"] = (df["target_ret_7d"] > 0).astype(float)
+    df.loc[df["target_ret_7d"].isna(), "target_up_7d"] = np.nan
 
     df = df.replace([np.inf, -np.inf], np.nan)
     return df

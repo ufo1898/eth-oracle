@@ -138,6 +138,7 @@ main { display: flex; flex-direction: column; gap: 18px; }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.purple { background: var(--purple); box-shadow: 0 0 10px rgba(168, 85, 247, 0.7); }
+.dot.cyan { background: var(--cyan); box-shadow: 0 0 10px rgba(34, 211, 238, 0.55); }
 .dot.green { background: var(--green); }
 .dot.red { background: var(--red); }
 
@@ -148,6 +149,14 @@ main { display: flex; flex-direction: column; gap: 18px; }
     radial-gradient(420px 240px at 110% -10%, rgba(168, 85, 247, 0.22), transparent 60%),
     linear-gradient(180deg, rgba(18, 29, 52, 0.95), rgba(11, 18, 33, 0.96));
 }
+.pred-head-right { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.horizon-tabs { display: inline-flex; padding: 3px; gap: 2px; border-radius: 9px; background: rgba(148, 163, 184, 0.08); border: 1px solid var(--line); }
+.horizon-tab {
+  border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 600;
+  padding: 5px 9px; border-radius: 6px; cursor: pointer; white-space: nowrap;
+}
+.horizon-tab.active { background: rgba(168, 85, 247, 0.20); color: #e9d5ff; }
+.horizon-tab:hover { color: var(--text); }
 .prediction-card::before {
   content: "";
   position: absolute;
@@ -201,7 +210,7 @@ main { display: flex; flex-direction: column; gap: 18px; }
 .driver .bear { color: var(--red); }
 .muted { color: var(--muted); }
 
-.stats-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 14px; }
+.stats-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 14px; }
 .stat { padding: 16px 18px; }
 .stat span { color: var(--muted); font-size: 11.5px; }
 .stat strong { display: block; font-size: 24px; font-variant-numeric: tabular-nums; margin-top: 8px; letter-spacing: -0.5px; }
@@ -212,6 +221,23 @@ main { display: flex; flex-direction: column; gap: 18px; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .two-col.wide-left { grid-template-columns: minmax(0, 1.55fr) minmax(300px, 0.8fr); }
 .mini-chart { width: 100%; height: 250px; }
+
+.sig-list { display: flex; flex-direction: column; gap: 10px; }
+.sig-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: baseline; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: rgba(148, 163, 184, 0.05); font-size: 12px; }
+.sig-row span { color: var(--muted); }
+.sig-row strong { color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+.sig-row strong.good { color: var(--green); }
+.sig-row strong.bad { color: var(--red); }
+.sig-note { margin: 10px 0 0; color: var(--muted-2); font-size: 11px; line-height: 1.6; }
+.sig-note.warn { color: #fcd34d; }
+.reliability-chart { width: 100%; height: 250px; }
+.reliability-chart svg { width: 100%; height: 100%; display: block; }
+.cal-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+.cal-stats div { background: rgba(148, 163, 184, 0.05); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; }
+.cal-stats span { display: block; color: var(--muted-2); font-size: 10px; }
+.cal-stats b { display: block; margin-top: 3px; font-size: 13px; font-variant-numeric: tabular-nums; }
+.note { margin: 12px 2px 0; color: var(--muted-2); font-size: 11px; line-height: 1.6; }
+.tag.weekly { background: rgba(34, 211, 238, 0.13); color: #a5f3fc; }
 
 .failure-list { display: flex; flex-direction: column; gap: 10px; }
 .failure-row { display: grid; grid-template-columns: 110px 1fr 45px; align-items: center; gap: 10px; font-size: 12px; }
@@ -309,6 +335,8 @@ footer {
   .price-chart { height: 360px; }
   .direction-big { font-size: 40px; }
   .card { padding: 16px; }
+  .pred-head-right { align-items: flex-start; }
+  .cal-stats { grid-template-columns: repeat(2, 1fr); }
 }
 
 @media (max-width: 520px) {

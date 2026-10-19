@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pandas as pd
 
 from app import config, db
 
 
-def _prediction(as_of: str, target: str, mode: str = "live") -> dict:
+def _prediction(as_of: str, target: str, mode: str = "live", horizon_days: int = 1) -> dict:
     return {
         "mode": mode,
         "as_of_date": as_of,
         "target_date": target,
+        "horizon_days": horizon_days,
         "created_at": "2026-10-01T00:00:00+00:00",
         "close": 2000.0,
         "predicted_close": 2020.0,
@@ -68,6 +71,75 @@ def test_upsert_is_idempotent(tmp_path, monkeypatch) -> None:
     frame = db.get_predictions("live")
     assert len(frame) == 1
     assert float(frame.iloc[0]["prob_up"]) == 0.7
+
+
+def test_daily_and_weekly_predictions_are_separate(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    db.init_db()
+    daily_id = db.upsert_prediction(_prediction("2026-10-01", "2026-10-02"))
+    weekly_id = db.upsert_prediction(_prediction("2026-10-01", "2026-10-08", horizon_days=7))
+    assert daily_id != weekly_id
+    assert db.count_predictions(horizon_days=1) == {"live:pending": 1}
+    assert db.count_predictions(horizon_days=7) == {"live:pending": 1}
+    assert len(db.get_predictions(horizon_days=1)) == 1
+    assert len(db.get_predictions(horizon_days=7)) == 1
+    assert db.get_latest_prediction("live", horizon_days=7)["horizon_days"] == 7
+    assert len(db.get_pending_predictions(horizon_days=None)) == 2
+    db.clear_predictions(horizon_days=7)
+    assert db.get_predictions(horizon_days=7).empty
+    assert len(db.get_predictions(horizon_days=1)) == 1
+
+
+def test_init_db_migrates_old_predictions_table(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "old.db"
+    monkeypatch.setattr(config, "DB_PATH", path)
+    with sqlite3.connect(path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mode TEXT NOT NULL,
+                as_of_date TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                close REAL,
+                predicted_close REAL,
+                predicted_return REAL,
+                prob_up REAL,
+                prob_raw REAL,
+                direction TEXT,
+                confidence REAL,
+                p_hgb REAL,
+                p_rf REAL,
+                p_et REAL,
+                p_lr REAL,
+                actual_close REAL,
+                actual_return REAL,
+                target_up INTEGER,
+                correct INTEGER,
+                status TEXT NOT NULL DEFAULT 'pending',
+                model_version TEXT,
+                features_json TEXT,
+                drivers_json TEXT,
+                failure_categories_json TEXT,
+                failure_reason TEXT,
+                news_score REAL,
+                resolved_at TEXT,
+                UNIQUE(mode, as_of_date)
+            );
+            INSERT INTO predictions
+                (mode, as_of_date, target_date, created_at, updated_at, close, status)
+            VALUES ('backtest', '2026-01-01', '2026-01-02', 'x', 'x', 2000, 'resolved');
+            """
+        )
+    db.init_db()
+    with sqlite3.connect(path) as conn:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(predictions)")}
+    assert "horizon_days" in columns
+    frame = db.get_predictions()
+    assert len(frame) == 1
+    assert int(frame.iloc[0]["horizon_days"]) == 1
 
 
 def test_model_run_and_report(tmp_path, monkeypatch) -> None:

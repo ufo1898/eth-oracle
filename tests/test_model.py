@@ -27,6 +27,21 @@ def test_train_and_predict(synthetic_features: pd.DataFrame) -> None:
     assert abs(prediction["predicted_return"]) < 0.5
 
 
+def test_train_weekly_bundle_uses_lagged_targets(synthetic_features: pd.DataFrame) -> None:
+    as_of = _as_of(synthetic_features)
+    bundle = model.train_bundle(
+        synthetic_features,
+        as_of=as_of,
+        target_col="target_up_7d",
+        target_ret_col="target_ret_7d",
+        horizon_days=7,
+    )
+    assert bundle.horizon_days == 7
+    assert bundle.version.endswith("-h7")
+    assert pd.Timestamp(bundle.train_end) <= as_of - pd.Timedelta(days=7)
+    assert bundle.n_samples > config.MIN_TRAIN_ROWS
+
+
 def test_top_drivers_shape(synthetic_features: pd.DataFrame) -> None:
     as_of = _as_of(synthetic_features)
     bundle = model.train_bundle(synthetic_features, as_of=as_of)

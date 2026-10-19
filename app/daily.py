@@ -104,6 +104,7 @@ def _build_record(
     mode: str,
     target_date: pd.Timestamp,
     news_score: float | None,
+    horizon_days: int = 1,
 ) -> dict[str, Any]:
     prediction = model.predict_one(bundle, row)
     drivers = model.top_drivers(bundle, row, k=6)
@@ -124,6 +125,7 @@ def _build_record(
         "p_et": prediction.get("p_et"),
         "p_lr": prediction.get("p_lr"),
         "status": "pending",
+        "horizon_days": int(horizon_days),
         "model_version": bundle.version,
         "features": _feature_snapshot(row, bundle),
         "drivers": drivers,
@@ -185,7 +187,13 @@ def resolve_pending(feature_df: pd.DataFrame) -> list[dict[str, Any]]:
             }
         )
         resolved.append(prediction)
-        log.info("Resolved live prediction %s: actual %.2f%% correct=%s", prediction["as_of_date"], actual_return * 100, correct)
+        log.info(
+            "Resolved live prediction %s (h%sd): actual %.2f%% correct=%s",
+            prediction["as_of_date"],
+            prediction.get("horizon_days") or 1,
+            actual_return * 100,
+            correct,
+        )
     return resolved
 
 
@@ -279,6 +287,7 @@ def generate_backtest(
             mode="backtest",
             target_date=target,
             news_score=None,
+            horizon_days=1,
         )
         actual_close = float(target_rows.iloc[-1]["close"])
         actual_return = actual_close / float(row["close"]) - 1
@@ -298,6 +307,106 @@ def generate_backtest(
         if count % 30 == 0:
             log.info("Backtest progress: %s predictions through %s", count, target.date())
     log.info("Backtest generated %s predictions", count)
+    return count
+
+
+def generate_weekly_backtest(
+    feature_df: pd.DataFrame,
+    *,
+    backtest_days: int,
+    rolling_weights: dict[str, float] | None,
+    candidates: list[str] | None = None,
+    horizon_days: int = 7,
+) -> int:
+    """Walk-forward backtest for the multi-day (weekly) horizon.
+
+    Target dates sit on a fixed lattice anchored at the first dataset date so
+    incremental runs stay idempotent. The model is retrained every
+    ``RETRAIN_DAYS`` with information strictly available ``horizon_days``
+    before the prediction day.
+    """
+    if feature_df.empty:
+        return 0
+    horizon = max(int(horizon_days), 1)
+    target_col = f"target_up_{horizon}d"
+    target_ret_col = f"target_ret_{horizon}d"
+    if target_col not in feature_df.columns or target_ret_col not in feature_df.columns:
+        log.warning("Weekly targets missing from feature frame")
+        return 0
+
+    end_target = pd.Timestamp(feature_df["date"].max()).normalize()
+    start_target = max(
+        pd.Timestamp(feature_df["date"].min()).normalize() + pd.Timedelta(days=config.MIN_TRAIN_ROWS + horizon),
+        end_target - pd.Timedelta(days=backtest_days),
+    )
+    existing = db.get_predictions(mode="backtest", limit=100000, horizon_days=horizon)
+    existing_targets: set[pd.Timestamp] = set()
+    if not existing.empty:
+        parsed = pd.to_datetime(existing["target_date"], errors="coerce").dropna()
+        existing_targets = {pd.Timestamp(value).normalize() for value in parsed}
+
+    candidates = candidates or feature_columns(feature_df)
+    available = set(feature_df["date"].tolist())
+    anchor = pd.Timestamp(feature_df["date"].min()).normalize()
+    bundle: model.ModelBundle | None = None
+    last_retrain_target: pd.Timestamp | None = None
+    count = 0
+    for target in pd.date_range(start_target, end_target, freq="D"):
+        target = pd.Timestamp(target).normalize()
+        if target not in available or (target - anchor).days % horizon != 0:
+            continue
+        if target in existing_targets:
+            continue
+        as_of = target - pd.Timedelta(days=horizon)
+        if as_of not in available:
+            continue
+        row = _feature_row(feature_df, as_of)
+        target_rows = feature_df[feature_df["date"] == target]
+        if row is None or target_rows.empty:
+            continue
+        if (
+            bundle is None
+            or last_retrain_target is None
+            or (target - last_retrain_target).days >= config.RETRAIN_DAYS
+        ):
+            try:
+                bundle = model.train_bundle(
+                    feature_df,
+                    as_of=as_of,
+                    candidates=candidates,
+                    weight_override=rolling_weights,
+                    target_col=target_col,
+                    target_ret_col=target_ret_col,
+                    horizon_days=horizon,
+                )
+                last_retrain_target = target
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Weekly backtest training failed at %s: %s", as_of.date(), exc)
+                continue
+        record = _build_record(
+            bundle,
+            row,
+            mode="backtest",
+            target_date=target,
+            news_score=None,
+            horizon_days=horizon,
+        )
+        actual_close = float(target_rows.iloc[-1]["close"])
+        actual_return = actual_close / float(row["close"]) - 1
+        target_up = int(actual_return > 0)
+        predicted_up = float(record["prob_up"]) >= 0.5
+        correct = int((1 if predicted_up else 0) == target_up)
+        record = _mark_backtest_resolved(
+            record,
+            actual_close=actual_close,
+            actual_return=actual_return,
+            target_up=target_up,
+            correct=correct,
+            news_score=None,
+        )
+        db.upsert_prediction(record)
+        count += 1
+    log.info("Weekly backtest generated %s predictions (horizon=%sd)", count, horizon)
     return count
 
 
@@ -321,11 +430,19 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
     news_stats = sentiment.news_summary(news_items)
 
     resolved = resolve_pending(feature_df)
+    resolved_daily = [item for item in resolved if int(item.get("horizon_days") or 1) == 1]
+    resolved_weekly = [item for item in resolved if int(item.get("horizon_days") or 1) == config.WEEKLY_HORIZON_DAYS]
     all_preds_before = db.get_predictions(limit=100000)
     rolling_weights = None
     if len(resolved_frame(all_preds_before)) >= 60:
         rolling_weights = optimize_weights(all_preds_before, window=90)
     threshold = choose_confidence_threshold(all_preds_before)
+
+    weekly_preds_before = db.get_predictions(limit=100000, horizon_days=config.WEEKLY_HORIZON_DAYS)
+    weekly_weights = None
+    if len(resolved_frame(weekly_preds_before)) >= 40:
+        weekly_weights = optimize_weights(weekly_preds_before, window=52)
+    weekly_threshold = choose_confidence_threshold(weekly_preds_before, window=52)
 
     as_of = pd.Timestamp(feature_df["date"].max()).normalize()
     target_date = as_of + pd.Timedelta(days=1)
@@ -355,6 +472,7 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         mode="live",
         target_date=target_date,
         news_score=news_stats["score"],
+        horizon_days=1,
     )
     db.upsert_prediction(live_record)
     log.info(
@@ -366,21 +484,74 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         live_record["predicted_close"],
     )
 
+    weekly_horizon = config.WEEKLY_HORIZON_DAYS
+    weekly_bundle: model.ModelBundle | None = None
+    weekly_record: dict[str, Any] | None = None
+    try:
+        log.info("Training weekly model (horizon=%sd) as of %s...", weekly_horizon, as_of.date())
+        weekly_bundle = model.train_bundle(
+            feature_df,
+            as_of=as_of,
+            candidates=candidates,
+            weight_override=weekly_weights,
+            target_col=f"target_up_{weekly_horizon}d",
+            target_ret_col=f"target_ret_{weekly_horizon}d",
+            horizon_days=weekly_horizon,
+        )
+        model.save_bundle(weekly_bundle, config.MODEL_WEEKLY_LATEST)
+        weekly_target_date = as_of + pd.Timedelta(days=weekly_horizon)
+        weekly_record = _build_record(
+            weekly_bundle,
+            row,
+            mode="live",
+            target_date=weekly_target_date,
+            news_score=news_stats["score"],
+            horizon_days=weekly_horizon,
+        )
+        db.upsert_prediction(weekly_record)
+        log.info(
+            "Weekly live prediction: %s -> %s direction=%s prob=%.3f",
+            weekly_record["as_of_date"],
+            weekly_record["target_date"],
+            weekly_record["direction"],
+            weekly_record["prob_up"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Weekly live model skipped: %s", exc)
+
     new_backtest = generate_backtest(
         feature_df,
         backtest_days=backtest_days,
         rolling_weights=rolling_weights,
         candidates=candidates,
     )
+    try:
+        new_weekly_backtest = generate_weekly_backtest(
+            feature_df,
+            backtest_days=config.WEEKLY_BACKTEST_DAYS,
+            rolling_weights=weekly_weights,
+            candidates=candidates,
+            horizon_days=weekly_horizon,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Weekly backtest skipped: %s", exc)
+        new_weekly_backtest = 0
 
     all_preds = db.get_predictions(limit=100000)
+    weekly_preds = db.get_predictions(limit=100000, horizon_days=weekly_horizon)
     metrics = metrics_summary(all_preds)
     live_preds = all_preds[all_preds["mode"] == "live"] if not all_preds.empty else all_preds
     backtest_preds = all_preds[all_preds["mode"] == "backtest"] if not all_preds.empty else all_preds
     live_metrics = metrics_summary(live_preds)
     backtest_metrics = metrics_summary(backtest_preds)
+    weekly_metrics = metrics_summary(weekly_preds)
+    weekly_live_preds = weekly_preds[weekly_preds["mode"] == "live"] if not weekly_preds.empty else weekly_preds
+    weekly_backtest_preds = weekly_preds[weekly_preds["mode"] == "backtest"] if not weekly_preds.empty else weekly_preds
+    weekly_live_metrics = metrics_summary(weekly_live_preds)
+    weekly_backtest_metrics = metrics_summary(weekly_backtest_preds)
     failures = failure_breakdown(all_preds)
     latest = _hydrate_prediction(db.get_latest_prediction("live"))
+    latest_weekly = _hydrate_prediction(db.get_latest_prediction("live", horizon_days=weekly_horizon))
     model_info = {**bundle_info, "importance": bundle.importance.head(25).round(6).to_dict()}
     refresh_status = build.load_refresh_status()
     optimization = {
@@ -388,7 +559,16 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         "threshold": threshold,
         "retrained": True,
         "new_backtest_predictions": new_backtest,
-        "resolved_live_predictions": len(resolved),
+        "resolved_live_predictions": len(resolved_daily),
+        "weekly": {
+            "weights": {
+                key: round(value, 4)
+                for key, value in (weekly_weights or (weekly_bundle.weights if weekly_bundle else {})).items()
+            },
+            "threshold": weekly_threshold,
+            "new_backtest_predictions": new_weekly_backtest,
+            "resolved_live_predictions": len(resolved_weekly),
+        },
     }
     report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     report = analysis.build_daily_report(
@@ -402,8 +582,21 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         news_items=news_items,
         refresh_status=refresh_status,
         optimization=optimization,
+        weekly_prediction=latest_weekly,
+        weekly_metrics=weekly_metrics,
     )
-    db.store_report(report_date, report, {"overall": metrics, "live": live_metrics, "backtest": backtest_metrics})
+    db.store_report(
+        report_date,
+        report,
+        {
+            "overall": metrics,
+            "live": live_metrics,
+            "backtest": backtest_metrics,
+            "weekly_overall": weekly_metrics,
+            "weekly_live": weekly_live_metrics,
+            "weekly_backtest": weekly_backtest_metrics,
+        },
+    )
     report_path = config.REPORT_DIR / f"{report_date}.md"
     report_path.write_text(report, encoding="utf-8")
 
@@ -412,12 +605,19 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         "report_date": report_date,
         "data_last_date": str(as_of.date()),
         "live_prediction": _hydrate_prediction(live_record),
-        "resolved_live_predictions": len(resolved),
+        "weekly_prediction": _hydrate_prediction(weekly_record),
+        "resolved_live_predictions": len(resolved_daily),
+        "resolved_weekly_predictions": len(resolved_weekly),
         "new_backtest_predictions": new_backtest,
+        "new_weekly_backtest_predictions": new_weekly_backtest,
         "metrics": metrics,
         "live_metrics": live_metrics,
         "backtest_metrics": backtest_metrics,
+        "weekly_metrics": weekly_metrics,
+        "weekly_live_metrics": weekly_live_metrics,
+        "weekly_backtest_metrics": weekly_backtest_metrics,
         "model": bundle_info,
+        "weekly_model": weekly_bundle.info(),
         "optimization": optimization,
         "news": news_stats,
         "report_path": str(report_path),
