@@ -59,7 +59,7 @@ ETH 次日方向预测 · 多因子统计研究工具。用 Binance 现货/合�
 要求：macOS/Linux、Python 3.11+（本项目在 Python 3.12.13 上验证）。
 
 ```bash
-cd "/Users/liuxin/Documents/Default Project/eth-oracle"
+cd /path/to/eth-oracle
 
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
