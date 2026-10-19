@@ -232,6 +232,8 @@ def build_daily_report(
     optimization: dict[str, Any],
     weekly_prediction: dict[str, Any] | None = None,
     weekly_metrics: dict[str, Any] | None = None,
+    promotion: dict[str, Any] | None = None,
+    weekly_gate: dict[str, Any] | None = None,
 ) -> str:
     lines: list[str] = []
     lines.append(f"# ETH Oracle 日报 · {report_date}")
@@ -337,6 +339,36 @@ def build_daily_report(
                 f"｜平均预测概率 {wcal.get('mean_prob')}"
             )
     lines.append("")
+    lines.append("## 每日复盘与模型门禁")
+    if promotion:
+        decision = "上线新模型" if promotion.get("promote") else "保留在任模型"
+        lines.append(f"- 模型门禁：**{decision}**｜{promotion.get('reason', 'n/a')}")
+        champ = promotion.get("champion") or {}
+        chall = promotion.get("challenger") or {}
+        if champ.get("n") and chall.get("n"):
+            lines.append(
+                f"- 对比窗口 {promotion.get('window_from')} → {promotion.get('window_to')}（{champ.get('n')} 天）："
+                f"在任 acc {champ.get('accuracy', 0):.1%} / Brier {champ.get('brier')}；"
+                f"挑战者 acc {chall.get('accuracy', 0):.1%} / Brier {chall.get('brier')}"
+            )
+        lines.append(
+            f"- 版本：在任 {promotion.get('champion_version') or '无'}｜"
+            f"挑战者 {promotion.get('challenger_version') or '无'}｜部署 {promotion.get('deployed_version') or '无'}"
+        )
+    if weekly_gate:
+        gate_text = "允许输出" if weekly_gate.get("allowed") else "暂停输出"
+        lines.append(f"- 周模型门禁：**{gate_text}**｜{weekly_gate.get('reason', 'n/a')}")
+    window30 = (metrics.get("windows") or {}).get("30") if metrics else None
+    if window30:
+        lines.append(f"- 近 30 次准确率：{window30['accuracy']:.1%}（{window30['n']} 次）")
+    if failure_breakdown:
+        top = "、".join(f"{item['category']} {item['share']:.0%}" for item in failure_breakdown[:3])
+        lines.append(f"- 近期失败主因：{top}")
+    if resolved_today:
+        daily_n = sum(1 for item in resolved_today if int(item.get("horizon_days") or 1) == 1)
+        weekly_n = sum(1 for item in resolved_today if int(item.get("horizon_days") or 1) > 1)
+        lines.append(f"- 本次结算：日 {daily_n} 笔 / 周 {weekly_n} 笔")
+    lines.append("")
 
     lines.append("## 昨日/最近结算复盘")
     if resolved_today:
@@ -393,13 +425,21 @@ def build_daily_report(
     lines.append("")
 
     lines.append("## 自动优化动作")
+    review = optimization.get("promotion") or {}
+    if review:
+        deployed = "挑战者上线" if review.get("promote") else "在任模型继续"
+        lines.append(f"- 模型门禁：{deployed}｜{review.get('reason', 'n/a')}｜部署 {review.get('deployed_version')}")
     lines.append(f"- 动态集成权重：{optimization.get('weights')}")
     lines.append(f"- 高置信度阈值：{optimization.get('threshold')}")
     weekly_optimization = optimization.get("weekly") or {}
     if weekly_optimization:
         lines.append(f"- 周模型权重：{weekly_optimization.get('weights')}｜阈值 {weekly_optimization.get('threshold')}")
+        gate = weekly_optimization.get("gate") or {}
+        if gate:
+            gate_text = "允许输出" if gate.get("allowed") else "暂停输出"
+            lines.append(f"- 周模型门禁：{gate_text}｜{gate.get('reason', 'n/a')}")
     lines.append(
-        f"- 流程：结算待定预测 → 重新拉取数据 → 重训模型 → 更新权重/阈值 → 生成下一日与未来 7 天预测。"
+        f"- 流程：结算待定预测 → 重新拉取数据 → 训练挑战者 → 门禁对比 → 部署/保留模型 → 更新权重/阈值 → 生成下一日预测（周模型仅在通过门禁时输出）。"
     )
     lines.append("")
     lines.append("---")

@@ -14,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import __version__, config, daily, db
+from app import __version__, config, daily, db, promotion
 from app.data import build
 from app.evaluation import (
     accuracy_series,
@@ -80,6 +80,7 @@ def _metrics_payload() -> dict[str, Any]:
     weekly = db.get_predictions(limit=100000, horizon_days=config.WEEKLY_HORIZON_DAYS)
     weekly_live = weekly[weekly["mode"] == "live"] if not weekly.empty else weekly
     weekly_backtest = weekly[weekly["mode"] == "backtest"] if not weekly.empty else weekly
+    weekly_gate = promotion.weekly_signal_allowed(metrics_summary(weekly_backtest))
     return {
         "overall": metrics_summary(preds),
         "live": metrics_summary(live),
@@ -90,6 +91,7 @@ def _metrics_payload() -> dict[str, Any]:
             "backtest": metrics_summary(weekly_backtest),
             "threshold": choose_confidence_threshold(weekly, window=52),
             "counts": db.count_predictions(horizon_days=config.WEEKLY_HORIZON_DAYS),
+            "gate": weekly_gate,
         },
         "accuracy_series": accuracy_series(preds, 30),
         "failure_breakdown": failure_breakdown(preds),
@@ -129,6 +131,8 @@ def overview() -> dict[str, Any]:
         model_info["feature_cols"] = bundle.feature_cols
     preds = db.get_predictions(limit=100000)
     metrics = _metrics_payload()
+    if not (metrics.get("weekly", {}).get("gate") or {}).get("allowed", True):
+        latest_weekly = None
     news_items = db.get_news(limit=30)
     latest_report = db.get_latest_report()
     refresh = build.load_refresh_status()
@@ -140,6 +144,7 @@ def overview() -> dict[str, Any]:
             "latest_weekly_prediction": latest_weekly,
             "model": model_info,
             "metrics": metrics,
+            "weekly_gate": metrics["weekly"].get("gate"),
             "news": {
                 "items": news_items,
                 "summary": {
@@ -202,6 +207,15 @@ def candles(days: int = Query(240, ge=30, le=2000)) -> dict[str, Any]:
             "horizon_days": latest.get("horizon_days") or 1,
         }
     weekly = _safe_record(db.get_latest_prediction("live", horizon_days=config.WEEKLY_HORIZON_DAYS))
+    if weekly is not None:
+        weekly_backtest = db.get_predictions(
+            mode="backtest",
+            resolved_only=True,
+            horizon_days=config.WEEKLY_HORIZON_DAYS,
+            limit=100000,
+        )
+        if not promotion.weekly_signal_allowed(metrics_summary(weekly_backtest))["allowed"]:
+            weekly = None
     weekly_prediction = None
     if weekly:
         weekly_prediction = {

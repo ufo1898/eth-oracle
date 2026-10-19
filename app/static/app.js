@@ -20,6 +20,7 @@
     lastLoaded: null,
     latestPrediction: null,
     latestPredictions: { 1: null, 7: null },
+    weeklyGate: null,
     horizon: 1,
   };
 
@@ -324,6 +325,7 @@
       1: data.latest_prediction || null,
       7: data.latest_weekly_prediction || null,
     };
+    state.weeklyGate = data.weekly_gate || (data.metrics && data.metrics.weekly && data.metrics.weekly.gate) || null;
     renderPredictionCard();
   }
 
@@ -339,13 +341,15 @@
       tab.classList.toggle("active", Number(tab.dataset.horizon) === state.horizon);
     });
     if (!latest) {
+      const gate = state.weeklyGate;
+      const blocked = weekly && gate && gate.allowed === false;
       directionEl.textContent = "—";
       directionEl.className = "direction-big";
-      $("#pred-target").textContent = weekly ? "周预测尚未生成" : "等待首次运行";
-      $("#pred-range").textContent = weekly
-        ? "每日任务运行后生成 7 天方向预测"
-        : "点击右上角“立即更新”生成预测";
-      statusEl.textContent = weekly ? "无周预测" : "未初始化";
+      $("#pred-target").textContent = blocked ? "周模型已暂停" : (weekly ? "周预测尚未生成" : "等待首次运行");
+      $("#pred-range").textContent = blocked
+        ? gate.reason
+        : (weekly ? "每日任务运行后生成 7 天方向预测" : "点击右上角“立即更新”生成预测");
+      statusEl.textContent = blocked ? "未通过验证" : (weekly ? "无周预测" : "未初始化");
       statusEl.className = "pill pending";
       ["#pred-prob", "#pred-confidence", "#pred-close", "#pred-predicted-close"].forEach((selector) => {
         $(selector).textContent = "—";

@@ -90,6 +90,26 @@ def test_daily_and_weekly_predictions_are_separate(tmp_path, monkeypatch) -> Non
     assert len(db.get_predictions(horizon_days=1)) == 1
 
 
+def test_clear_pending_predictions_keeps_resolved(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(config, "DB_PATH", tmp_path / "test.db")
+    db.init_db()
+    resolved_id = db.upsert_prediction(_prediction("2026-10-01", "2026-10-08", horizon_days=7))
+    db.mark_resolved(
+        resolved_id,
+        actual_close=2010.0,
+        actual_return=0.005,
+        target_up=1,
+        correct=1,
+        failure_categories=[],
+        failure_reason="预测正确",
+    )
+    db.upsert_prediction(_prediction("2026-10-08", "2026-10-15", horizon_days=7))
+    db.clear_predictions(horizon_days=7, pending_only=True)
+    frame = db.get_predictions(horizon_days=7)
+    assert len(frame) == 1
+    assert frame.iloc[0]["status"] == "resolved"
+
+
 def test_init_db_migrates_old_predictions_table(tmp_path, monkeypatch) -> None:
     path = tmp_path / "old.db"
     monkeypatch.setattr(config, "DB_PATH", path)

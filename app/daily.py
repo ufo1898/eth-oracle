@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from app import analysis, config, db, model
+from app import analysis, config, db, model, promotion
 from app.data import build, sentiment
 from app.evaluation import (
     choose_confidence_threshold,
@@ -451,20 +451,72 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         raise RuntimeError(f"No feature row for as_of {as_of.date()}")
     candidates = feature_columns(feature_df)
 
-    log.info("Training live model as of %s...", as_of.date())
-    bundle = model.train_bundle(
+    log.info("Training live candidate as of %s...", as_of.date())
+    champion = model.load_bundle()
+    candidate = model.train_bundle(
         feature_df,
         as_of=as_of,
         candidates=candidates,
         weight_override=rolling_weights,
     )
-    model.save_bundle(bundle)
+    deployed = candidate
+    promotion_review: dict[str, Any] = {
+        "decision": "promote",
+        "promote": True,
+        "reason": "没有在任模型，直接上线",
+        "champion": None,
+        "challenger": None,
+    }
+    if champion is not None:
+        try:
+            gate_candidate = model.train_bundle(
+                feature_df,
+                as_of=as_of - pd.Timedelta(days=config.PROMOTION_EVAL_DAYS),
+                candidates=candidates,
+                weight_override=rolling_weights,
+            )
+            promotion_review = promotion.review_candidate(
+                champion,
+                gate_candidate,
+                feature_df,
+                as_of=as_of,
+                eval_days=config.PROMOTION_EVAL_DAYS,
+            )
+            if not promotion_review["promote"]:
+                deployed = champion
+                model.save_bundle(candidate, config.MODEL_CHALLENGER)
+                log.warning(
+                    "Challenger %s rejected; keeping champion %s: %s",
+                    candidate.version,
+                    champion.version,
+                    promotion_review["reason"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Promotion gate failed, keeping champion: %s", exc)
+            promotion_review = {
+                "decision": "keep",
+                "promote": False,
+                "reason": f"门禁评估失败，保留在任模型：{exc}",
+                "champion": None,
+                "challenger": None,
+            }
+            deployed = champion
+    if deployed is candidate:
+        model.save_bundle(candidate)
+    promotion_review = {
+        **promotion_review,
+        "champion_version": champion.version if champion is not None else None,
+        "challenger_version": candidate.version,
+        "deployed_version": deployed.version,
+    }
+    bundle = deployed
     bundle_info = bundle.info()
-    db.store_model_run(
-        bundle_info,
-        bundle.feature_cols,
-        bundle.importance.head(60).round(6).to_dict(),
-    )
+    if deployed is candidate:
+        db.store_model_run(
+            bundle_info,
+            bundle.feature_cols,
+            bundle.importance.head(60).round(6).to_dict(),
+        )
 
     live_record = _build_record(
         bundle,
@@ -487,7 +539,13 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
     weekly_horizon = config.WEEKLY_HORIZON_DAYS
     weekly_bundle: model.ModelBundle | None = None
     weekly_record: dict[str, Any] | None = None
+    weekly_gate_before = promotion.weekly_signal_allowed(metrics_summary(weekly_preds_before))
+    if not weekly_gate_before["allowed"]:
+        log.warning("Weekly live signal disabled before training: %s", weekly_gate_before["reason"])
+        db.clear_predictions(mode="live", horizon_days=weekly_horizon, pending_only=True)
     try:
+        if not weekly_gate_before["allowed"]:
+            raise RuntimeError(weekly_gate_before["reason"])
         log.info("Training weekly model (horizon=%sd) as of %s...", weekly_horizon, as_of.date())
         weekly_bundle = model.train_bundle(
             feature_df,
@@ -549,17 +607,25 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
     weekly_backtest_preds = weekly_preds[weekly_preds["mode"] == "backtest"] if not weekly_preds.empty else weekly_preds
     weekly_live_metrics = metrics_summary(weekly_live_preds)
     weekly_backtest_metrics = metrics_summary(weekly_backtest_preds)
+    weekly_gate = promotion.weekly_signal_allowed(weekly_metrics)
+    if not weekly_gate["allowed"] and weekly_record is not None:
+        db.clear_predictions(mode="live", horizon_days=weekly_horizon, pending_only=True)
+        weekly_record = None
+        log.warning("Weekly live signal disabled after review: %s", weekly_gate["reason"])
     failures = failure_breakdown(all_preds)
     latest = _hydrate_prediction(db.get_latest_prediction("live"))
-    latest_weekly = _hydrate_prediction(db.get_latest_prediction("live", horizon_days=weekly_horizon))
+    latest_weekly = None
+    if weekly_gate["allowed"]:
+        latest_weekly = _hydrate_prediction(db.get_latest_prediction("live", horizon_days=weekly_horizon))
     model_info = {**bundle_info, "importance": bundle.importance.head(25).round(6).to_dict()}
     refresh_status = build.load_refresh_status()
     optimization = {
-        "weights": {key: round(value, 4) for key, value in (rolling_weights or bundle.weights).items()},
+        "weights": {key: round(value, 4) for key, value in bundle.weights.items()},
         "threshold": threshold,
-        "retrained": True,
+        "retrained": deployed is candidate,
         "new_backtest_predictions": new_backtest,
         "resolved_live_predictions": len(resolved_daily),
+        "promotion": promotion_review,
         "weekly": {
             "weights": {
                 key: round(value, 4)
@@ -568,6 +634,7 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
             "threshold": weekly_threshold,
             "new_backtest_predictions": new_weekly_backtest,
             "resolved_live_predictions": len(resolved_weekly),
+            "gate": weekly_gate,
         },
     }
     report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -584,6 +651,8 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         optimization=optimization,
         weekly_prediction=latest_weekly,
         weekly_metrics=weekly_metrics,
+        promotion=promotion_review,
+        weekly_gate=weekly_gate,
     )
     db.store_report(
         report_date,
@@ -617,7 +686,9 @@ def run_daily(*, backtest_days: int | None = None, fetch: bool = True) -> dict[s
         "weekly_live_metrics": weekly_live_metrics,
         "weekly_backtest_metrics": weekly_backtest_metrics,
         "model": bundle_info,
-        "weekly_model": weekly_bundle.info(),
+        "weekly_model": weekly_bundle.info() if weekly_bundle else None,
+        "promotion": promotion_review,
+        "weekly_gate": weekly_gate,
         "optimization": optimization,
         "news": news_stats,
         "report_path": str(report_path),

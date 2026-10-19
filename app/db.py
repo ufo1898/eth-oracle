@@ -443,7 +443,11 @@ def count_predictions(horizon_days: int | None = 1) -> dict[str, int]:
     return {f"{row['mode']}:{row['status']}": int(row["n"]) for row in rows}
 
 
-def clear_predictions(mode: str | None = None, horizon_days: int | None = None) -> None:
+def clear_predictions(
+    mode: str | None = None,
+    horizon_days: int | None = None,
+    pending_only: bool = False,
+) -> None:
     clauses: list[str] = []
     params: list[Any] = []
     if mode:
@@ -452,6 +456,8 @@ def clear_predictions(mode: str | None = None, horizon_days: int | None = None) 
     if horizon_days is not None:
         clauses.append("horizon_days=?")
         params.append(int(horizon_days))
+    if pending_only:
+        clauses.append("status='pending'")
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with _connect() as conn:
         conn.execute(f"DELETE FROM predictions {where}", params)

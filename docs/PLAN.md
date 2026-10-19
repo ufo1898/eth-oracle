@@ -29,6 +29,7 @@ app/features.py  (154 features, next-day target)
 app/model.py  (HGB + RF + ET + LR, calibrator, HGB regressor)
         │
         ├── app/evaluation.py  (metrics, walk-forward weights, threshold)
+        ├── app/promotion.py   (champion/challenger gate, weekly signal gate)
         ├── app/analysis.py    (failure labels, Markdown report)
         └── app/db.py          (SQLite: predictions/model_runs/news/reports)
         │
@@ -47,6 +48,8 @@ app/main.py (FastAPI) ──► app/static/* (dashboard)
 - **存储**：SQLite WAL；预测以 `(mode, as_of_date, horizon_days)` 唯一；旧库自动迁移，日/周预测互不覆盖。
 - **调度**：UTC 日线 08:00 CST 收盘，08:10 CST 跑每日任务（日/周模型与回测增量更新）。
 - **统计诚实**：同时报告准确率、基线、二项检验 p 值、95% CI、Brier skill、ECE 和 sharpness；不把 0.5pp 的噪声包装成优势。
+- **模型上线门禁**：每日训练挑战者，在目标已揭晓的最近 60 天与在任模型比较；准确率不劣化（0.5pp 容差）、Brier 恶化 ≤0.02 且不低于自身基线 2pp 才替换；否则保留冠军，挑战者另存。门禁是相对保护，不是收益保证。
+- **周模型输出门禁**：周回测 n≥30 且准确率低于基线 2pp 以上，或 p<0.05 且 acc<50% 时暂停周 live 输出，只继续累积回测；避免把已知失效的信号展示为可用预测。
 
 ## 4. 已完成
 
@@ -68,7 +71,10 @@ app/main.py (FastAPI) ──► app/static/* (dashboard)
 - [x] 未来 7 天预测：周目标、周模型、周回测、周权重/阈值、数据库 horizon 隔离与迁移。
 - [x] 多标的泛化验证：ETH/BTC/SOL 同一套特征走步回测，结果写入 `data/cache/asset_validation.json` 并由 `/api/validation` 展示。
 - [x] GUI：日/周预测切换、显著性卡片、可靠性图、多标的验证表、预测周期列。
-- [x] 31+ 测试：新增二项检验、校准、周目标、周模型、horizon 隔离/迁移、validation API。
+- [x] champion/challenger 门禁：挑战者在最近 60 天对比在任模型，通过才覆盖线上模型；失败另存并记录原因。
+- [x] 周模型输出门禁：首轮 52 个样本显著低于基线后，自动暂停周 live 预测，UI/日报/API 显示暂停原因。
+- [x] 日报“每日复盘与模型门禁”章节：记录双方指标、版本、决策、周模型状态、近 30 次准确率和失败主因。
+- [x] 测试：二项检验、校准、周目标、周模型、horizon 隔离/迁移、validation API、门禁决策、pending-only 清理。
 
 ## 5. 首轮真实结果
 
@@ -101,6 +107,14 @@ app/main.py (FastAPI) ──► app/static/* (dashboard)
 
 三个标的均无显著优势，支持“ETH 上的小幅超额是噪声/过拟合”的判断。
 
+### 5.1 门禁实测（2026-10-20）
+
+- 日模型门禁窗口：`2026-08-19 → 2026-10-17`（60 天）。
+- 在任 `v20261019-203749`：acc 56.67%，Brier 0.2364。
+- 挑战者 `v20261019-205737`：acc 55.00%，Brier 0.2488。
+- 决策：**保留在任模型**（准确率下降 1.67pp，未达到替换条件）；挑战者写入 `model_challenger.joblib`。
+- 周模型：n=52，acc 34.62%，baseline 51.92%，p=0.036；触发周门禁，已暂停 live 输出并清理未结算周记录。
+
 ## 6. 踩坑与经验
 
 - FRED 对 Chrome/自定义 UA 会挂起，`curl/8.7.1` UA + 直连优先可用；代理对 FRED 反而超时。
@@ -126,9 +140,11 @@ app/main.py (FastAPI) ──► app/static/* (dashboard)
 
 - [x] 概率校准（可靠性曲线 / ECE / Brier skill / sharpness）与显著性检验。
 - [x] ETH/BTC/SOL 跨标泛化验证。
-- [ ] 周模型失败归因：检查方向反转、regime 与样本重叠，决定修复或下线。
+- [x] 周模型失败归因：首轮检查后判定为失败分支，已暂停 live 输出；后续修复需重新通过门禁。
+- [ ] 周模型修复：检查方向反转、regime 与样本重叠；样本扩大后重新评估。
 - [ ] 加入交易成本/滑点后的策略净值与按置信度分层的收益。
 - [ ] 用滚动窗口做概率校准稳定性检查。
+- [ ] 门禁评估去偏：用严格滚动窗口/嵌套验证替代“在任模型可能见过评估窗口”的当前实现。
 - [ ] 增加特征漂移和模型性能告警。
 - [ ] 评估按波动率/趋势 regime 分层的子模型。
 - [ ] 补充期权 skew、ETF flows、链上转账等数据。
